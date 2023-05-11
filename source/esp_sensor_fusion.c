@@ -27,6 +27,8 @@
 #include "status.h"        // Sta:tus indicator interface - application specific
 #include "../drivers/drivers.h"       // NXP sensor drivers OR customer-supplied drivers
 
+#include "esp_sensor_fusion.h"
+
 static const char *TAG = "sensor_fusion_main_two";
 
 // Global data structures
@@ -36,34 +38,12 @@ StatusSubsystem statusSubsystem;   ///< provides visual (usually LED) status ind
 struct PhysicalSensor sensors[1];  ///< This implementation uses one physical sensor
 EventGroupHandle_t event_group  = NULL;
 
-_Noreturn static void read_task(void *pvParameters);   // FreeRTOS Task definition
-_Noreturn static void fusion_task(void *pvParameters); // FreeRTOS Task definition
-
 static const uint8_t CMPS12_i2C_ADDR = 0xC0 >> 1;  //  CMPS12 I2C address
 registerDeviceInfo_t i2cBusInfo = {.deviceInstance = 0, .functionParam = NULL, .idleFunction = NULL};
+static on_fusion_data ext_on_fusion_data_cb = NULL;
 
-/// This is a FreeRTOS (dual task) implementation of the NXP sensor fusion demo build.
-int start_fusing(void)
-{
-    initializeControlPort(&controlSubsystem);    // configure pins and ports for the control sub-system
-    initializeStatusSubsystem(&statusSubsystem); // configure pins and ports for the status sub-system
-    initSensorFusionGlobals(&sfg, &statusSubsystem, &controlSubsystem); // Initialize sensor fusion structures
-    // "install" the sensors we will be using
-    sfg.installSensor(&sfg, &sensors[0], CMPS12_i2C_ADDR, 1, &i2cBusInfo, &i2cBusInfo, CMPS12_Init,
-                      CMPS12_Read);
-    sfg.initializeFusionEngine(&sfg); // This will initialize sensors and magnetic calibration
-
-    event_group = xEventGroupCreate();
-    xTaskCreate(read_task, "READ", 16 * 1024,
-                NULL, tskIDLE_PRIORITY + 2, NULL);
-    xTaskCreate(fusion_task, "FUSION", 16 * 1024,
-                NULL, tskIDLE_PRIORITY + 1, NULL);
-//
-//    sfg.setStatus(&sfg, NORMAL);     // If we got this far, let's set status state to NORMAL
-    return 0;
-}
-
-_Noreturn static void read_task(void *pvParameters)
+// This task is responsible for polling the sensors at a fixed rate on I2C  or SPI bus
+_Noreturn static void sensors_poll_task(void *pvParameters)
 {
     uint16_t i; // general counter variable
     portTickType lastWakeTime;
@@ -103,9 +83,34 @@ _Noreturn static void fusion_task(void *pvParameters)
             i = 0;                  // should cycle at least four times for that to operate correctly.
             sfg.updateStatus(&sfg); // This is where pending status updates are made visible
         }
+
+        ext_on_fusion_data_cb(&sfg); // Call the external callback function4
+
         sfg.queueStatus(&sfg, NORMAL);                          // assume NORMAL status for next pass through the loop
         sfg.pControlSubsystem->stream(&sfg, sUARTOutputBuffer); // Send stream data to the Sensor Fusion Toolbox
     }
+}
+
+/// This is a FreeRTOS (dual task) implementation of the NXP sensor fusion demo build.
+int start_fusing(on_fusion_data on_fusion_data_cb)
+{
+    ext_on_fusion_data_cb = on_fusion_data_cb;
+    initializeControlPort(&controlSubsystem);    // configure pins and ports for the control sub-system
+    initializeStatusSubsystem(&statusSubsystem); // configure pins and ports for the status sub-system
+    initSensorFusionGlobals(&sfg, &statusSubsystem, &controlSubsystem); // Initialize sensor fusion structures
+    // "install" the sensors we will be using
+    sfg.installSensor(&sfg, &sensors[0], CMPS12_i2C_ADDR, 1, &i2cBusInfo, &i2cBusInfo, CMPS12_Init,
+                      CMPS12_Read);
+    sfg.initializeFusionEngine(&sfg); // This will initialize sensors and magnetic calibration
+
+    event_group = xEventGroupCreate();
+    xTaskCreate(sensors_poll_task, "READ", 16 * 1024,
+                NULL, tskIDLE_PRIORITY + 2, NULL);
+    xTaskCreate(fusion_task, "FUSION", 16 * 1024,
+                NULL, tskIDLE_PRIORITY + 1, NULL);
+
+    sfg.setStatus(&sfg, NORMAL);     // If we got this far, let's set status state to NORMAL
+    return 0;
 }
 
 /// \endcode
